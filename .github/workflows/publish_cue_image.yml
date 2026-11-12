@@ -1,0 +1,77 @@
+name: Build and publish the CUE Troupe image
+on:
+  push:
+    branches: [cue]
+  workflow_dispatch:
+
+env:
+  IMAGE: ghcr.io/birsax2/troupe
+
+jobs:
+  build:
+    if: github.repository_owner == 'BIRSAx2'
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+      - run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.runner }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  manifest:
+    if: github.repository_owner == 'BIRSAx2'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
+      - working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            --tag ${{ env.IMAGE }}:cue \
+            --tag ${{ env.IMAGE }}:sha-${GITHUB_SHA::12} \
+            $(printf '${{ env.IMAGE }}@sha256:%s ' *)
+      - run: docker buildx imagetools inspect ${{ env.IMAGE }}:sha-${GITHUB_SHA::12}
